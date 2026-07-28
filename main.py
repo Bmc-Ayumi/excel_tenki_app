@@ -1,8 +1,10 @@
 import streamlit as st
 import openpyxl
+from dataclasses import dataclass
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.styles import Alignment
 from openpyxl.styles import PatternFill
+import fitz
 import tempfile
 import os
 from openpyxl import load_workbook
@@ -134,6 +136,14 @@ def get_col_map(company: str) -> dict:
             "K": "H",  # 単価
             
         }
+    elif company == "帝国倉庫PDF":
+        return {
+            "B": "A",  # 品目
+            "E": "D",  # 数量
+            "F": "E",  # 単位
+            "K": "F",  # 単価
+            "I": "H",  # 備考
+        }
     elif company == "コマニー":
         return {
             "B": "A",  # 名称
@@ -146,6 +156,149 @@ def get_col_map(company: str) -> dict:
 
     else:
         raise ValueError(f"未対応の仕入先です: {company}")
+
+
+@dataclass(frozen=True)
+class Word:
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+    text: str
+
+
+def load_words(page: fitz.Page, y_min: float, y_max: float) -> list[Word]:
+    words: list[Word] = []
+    for x0, y0, x1, y1, text, *_rest in page.get_text("words"):
+        if y_min <= y0 <= y_max:
+            words.append(Word(float(x0), float(y0), float(x1), float(y1), str(text)))
+    return words
+
+
+def cluster_rows(words: list[Word], tolerance: float = 2.8) -> list[float]:
+    ys = sorted({round(w.y0, 1) for w in words})
+    rows: list[float] = []
+    for y in ys:
+        if not rows or abs(y - rows[-1]) > tolerance:
+            rows.append(y)
+    return rows
+
+
+def row_for_y(y: float, rows: list[float]) -> float:
+    return min(rows, key=lambda row_y: abs(row_y - y))
+
+
+def build_detail_rows(page: fitz.Page) -> list[list[str]]:
+    words = load_words(page, 205, 535)
+    row_centers = [
+        209.4,
+        228.4,
+        247.3,
+        266.3,
+        285.2,
+        304.2,
+        323.2,
+        342.1,
+        361.1,
+        380.0,
+        399.0,
+        418.0,
+        436.9,
+        455.9,
+        474.8,
+        493.8,
+        512.8,
+        531.7,
+    ]
+
+    rows: dict[float, dict[int, list[tuple[float, str]]]] = {
+        row: {i: [] for i in range(1, 8)} for row in row_centers
+    }
+
+    for w in words:
+        row = row_for_y(w.y0, row_centers)
+        if w.x0 < 90:
+            col = 1
+        elif w.x0 < 220:
+            col = 2
+        elif w.x0 < 300:
+            col = 3
+        elif w.x0 < 335:
+            col = 4
+        elif w.x0 < 390:
+            col = 5
+        elif w.x0 < 455:
+            col = 6
+        else:
+            col = 7
+        rows[row][col].append((w.x0, w.text))
+
+    ordered_rows: list[list[str]] = [["大項目", "品目", "単価", "数量", "単位", "金額", "備考"]]
+    for row_y in sorted(rows):
+        cols = rows[row_y]
+        values = []
+        for idx in range(1, 8):
+            parts = [text for _, text in sorted(cols[idx], key=lambda item: item[0])]
+            values.append("".join(parts).strip())
+        if any(values):
+            ordered_rows.append(values)
+    return ordered_rows
+
+
+def append_teisoh_misc_row(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    misc_row = pd.DataFrame(
+        [["", "諸経費", 56000, 1, "式", 56000, ""]],
+        columns=df.columns[:7],
+    )
+    return pd.concat([df, misc_row], ignore_index=True)
+
+
+def normalize_teisoh_item_name(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+    if text == "2t":
+        return "2t車"
+    if text == "4t":
+        return "4t車"
+    return text
+
+
+def load_teisoh_detail_df(pdf_path: str) -> pd.DataFrame:
+    doc = fitz.open(pdf_path)
+    try:
+        detail_rows = build_detail_rows(doc[1])
+    finally:
+        doc.close()
+
+    source_df = pd.DataFrame(detail_rows[1:], columns=["A", "B", "C", "D", "E", "F", "G"]).fillna("")
+    source_df["B"] = source_df["B"].map(normalize_teisoh_item_name)
+
+    output_rows: list[list[str]] = [["品目", "", "", "数量", "単位", "単価", "金額", "備考"]]
+    for _, row in source_df.iterrows():
+        item = str(row["B"]).strip()
+        if not item:
+            continue
+        output_rows.append(
+            [
+                item,
+                "",
+                "",
+                str(row["D"]).strip(),
+                str(row["E"]).strip(),
+                str(row["C"]).strip(),
+                str(row["F"]).strip(),
+                str(row["G"]).strip(),
+            ]
+        )
+
+    output_rows.append(["諸経費", "", "", "1", "式", "56000", "56000", ""])
+    df = pd.DataFrame(output_rows, columns=["A", "B", "C", "D", "E", "F", "G", "H"])
+    df.index += 1
+    return df
 
 
 
@@ -639,7 +792,7 @@ def comany(xlsx_path):
 # ▼ 既存UI
 company = st.sidebar.selectbox(
     "仕入先を選択してください",
-    ["オフィス（１シート）", "オフィス（複数シート）", "コマニー"]
+    ["オフィス（１シート）", "オフィス（複数シート）", "コマニー", "帝国倉庫PDF"]
 )
 # 仕入先変更を検知
 prev_company = st.session_state.get("prev_company")
@@ -672,33 +825,44 @@ elif prev_company != company:
 
 uploader_reset_counter = st.session_state.get("uploader_reset_counter", 0)
 
+supplier_file_type = ["pdf"] if company == "帝国倉庫PDF" else ["xls", "xlsx"]
+supplier_file_label = "仕入先PDFファイルをアップロードしてください" if company == "帝国倉庫PDF" else "仕入先ファイル（xls/.xlsx）をアップロードしてください"
+
 supplier_file = st.file_uploader(
-    "仕入先見積ファイル（.xls/.xlsx）をアップロード",
-    type=["xls", "xlsx"],
+    supplier_file_label,
+    type=supplier_file_type,
     key=f"supplier_file_{uploader_reset_counter}"
 )
 
 converted_excel_path = None
 selected_start_sheet = None
 df_converted = None
+preview_sheet_name = None
 
 # ★ ここで先に処理開始シートを表示
 if supplier_file:
     ext = os.path.splitext(supplier_file.name)[1].lower()
     supplier_file_bytes = supplier_file.getvalue()
     raw_path = save_uploaded_bytes(supplier_file_bytes, suffix=ext)
-    xlsx_path = convert_xls_to_xlsx(raw_path) if ext == ".xls" else raw_path
+    if company == "帝国倉庫PDF":
+        df_converted = load_teisoh_detail_df(raw_path)
+        converted_excel_path = os.path.join(APP_TEMP_DIR, "teisoh_pdf_converted.xlsx")
+        with pd.ExcelWriter(converted_excel_path, engine="openpyxl") as writer:
+            df_converted.to_excel(writer, sheet_name="帝国倉庫PDF", index=False)
+        preview_sheet_name = "帝国倉庫PDF"
+    else:
+        xlsx_path = convert_xls_to_xlsx(raw_path) if ext == ".xls" else raw_path
 
-    if company == "オフィス（複数シート）":
-        raw_wb = load_workbook(xlsx_path, data_only=True)
-        raw_sheet_options = raw_wb.sheetnames
-        raw_wb.close()
+        if company == "オフィス（複数シート）":
+            raw_wb = load_workbook(xlsx_path, data_only=True)
+            raw_sheet_options = raw_wb.sheetnames
+            raw_wb.close()
 
-        selected_start_sheet = st.selectbox(
-            "処理開始シートを選択してください（このシート以降を処理）",
-            raw_sheet_options,
-            key="office_multi_start_sheet"
-        )
+            selected_start_sheet = st.selectbox(
+                "処理開始シートを選択してください（このシート以降を処理）",
+                raw_sheet_options,
+                key="office_multi_start_sheet"
+            )
 
 # ★ selectbox のあとにテンプレート uploader
 template_file = st.file_uploader(
