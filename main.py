@@ -24,6 +24,20 @@ import tempfile
 APP_TEMP_DIR = os.path.join(tempfile.gettempdir(), "excel_tenki_app")
 os.makedirs(APP_TEMP_DIR, exist_ok=True)
 
+TESSERACT_DIR_CANDIDATES = [
+    r"C:\Program Files\Tesseract-OCR",
+    r"C:\Program Files (x86)\Tesseract-OCR",
+]
+for _tesseract_dir in TESSERACT_DIR_CANDIDATES:
+    _tesseract_exe = os.path.join(_tesseract_dir, "tesseract.exe")
+    if os.path.exists(_tesseract_exe):
+        if _tesseract_dir not in os.environ.get("PATH", ""):
+            os.environ["PATH"] = _tesseract_dir + os.pathsep + os.environ.get("PATH", "")
+        _tessdata_dir = os.path.join(_tesseract_dir, "tessdata")
+        if os.path.isdir(_tessdata_dir):
+            os.environ.setdefault("TESSDATA_PREFIX", _tessdata_dir)
+        break
+
 def cleanup_app_temp():
     """このアプリが作った一時ファイルだけ削除する（Temp全体は触らない）"""
     try:
@@ -167,6 +181,24 @@ class Word:
     text: str
 
 
+def _word_close(a: Word, b: Word, tolerance: float = 2.0) -> bool:
+    return (
+        abs(a.x0 - b.x0) <= tolerance
+        and abs(a.y0 - b.y0) <= tolerance
+        and abs(a.x1 - b.x1) <= tolerance
+        and abs(a.y1 - b.y1) <= tolerance
+    )
+
+
+def _dedupe_words(words: list[Word]) -> list[Word]:
+    deduped: list[Word] = []
+    for w in sorted(words, key=lambda item: (round(item.y0, 1), item.x0, item.text)):
+        if any(_word_close(w, existing) for existing in deduped):
+            continue
+        deduped.append(w)
+    return deduped
+
+
 def load_words(page: fitz.Page, y_min: float, y_max: float) -> list[Word]:
     words: list[Word] = []
     for x0, y0, x1, y1, text, *_rest in page.get_text("words"):
@@ -241,6 +273,15 @@ def build_detail_rows(page: fitz.Page) -> list[list[str]]:
             parts = [text for _, text in sorted(cols[idx], key=lambda item: item[0])]
             values.append("".join(parts).strip())
         if any(values):
+            # 備考欄の折り返しだけでできた行は、前の行の備考へ結合する。
+            if (
+                len(ordered_rows) > 1
+                and not any(values[:6])
+                and values[6]
+            ):
+                prev = ordered_rows[-1]
+                prev[6] = (prev[6] + " " + values[6]).strip() if prev[6] else values[6]
+                continue
             ordered_rows.append(values)
     return ordered_rows
 
@@ -267,15 +308,58 @@ def normalize_teisoh_item_name(value: object) -> object:
     return text
 
 
+def split_merged_quantity_and_price(quantity: object, unit_price: object) -> tuple[object, object]:
+    def _split(value: object) -> tuple[str, str]:
+        if not isinstance(value, str):
+            return "", ""
+        text = value.strip().replace(" ", "")
+        m = re.match(r"^(-?\d{1,3})(\d{1,3}(?:,\d{3})+)$", text)
+        if not m:
+            return "", ""
+        return m.group(1), m.group(2)
+
+    quantity_text = "" if quantity is None else str(quantity).strip()
+    unit_price_text = "" if unit_price is None else str(unit_price).strip()
+
+    if quantity_text and not unit_price_text:
+        q, p = _split(quantity_text)
+        if q and p:
+            return q, p
+
+    if unit_price_text and not quantity_text:
+        q, p = _split(unit_price_text)
+        if q and p:
+            return q, p
+
+    return quantity, unit_price
+
+
 def load_teisoh_detail_df(pdf_path: str) -> pd.DataFrame:
     doc = fitz.open(pdf_path)
     try:
-        detail_rows = build_detail_rows(doc[1])
+        detail_rows: list[list[str]] = []
+        if len(doc) > 1:
+            for page_index in range(1, len(doc)):
+                page_rows = build_detail_rows(doc[page_index])
+                if not page_rows:
+                    continue
+                if not detail_rows:
+                    detail_rows.extend(page_rows)
+                else:
+                    detail_rows.extend(page_rows[1:])
     finally:
         doc.close()
 
     source_df = pd.DataFrame(detail_rows[1:], columns=["A", "B", "C", "D", "E", "F", "G"]).fillna("")
     source_df["B"] = source_df["B"].map(normalize_teisoh_item_name)
+
+    split_pairs = source_df.apply(
+        lambda row: split_merged_quantity_and_price(row["D"], row["C"]),
+        axis=1,
+        result_type="expand",
+    )
+    source_df["D"] = split_pairs[0]
+    source_df["C"] = split_pairs[1]
 
     output_rows: list[list[str]] = [["品目", "", "", "数量", "単位", "単価", "金額", "備考"]]
     for _, row in source_df.iterrows():
