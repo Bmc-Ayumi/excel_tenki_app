@@ -221,27 +221,11 @@ def row_for_y(y: float, rows: list[float]) -> float:
 
 
 def build_detail_rows(page: fitz.Page) -> list[list[str]]:
-    words = load_words(page, 205, 535)
-    row_centers = [
-        209.4,
-        228.4,
-        247.3,
-        266.3,
-        285.2,
-        304.2,
-        323.2,
-        342.1,
-        361.1,
-        380.0,
-        399.0,
-        418.0,
-        436.9,
-        455.9,
-        474.8,
-        493.8,
-        512.8,
-        531.7,
-    ]
+    # 固定の行座標に頼らず、ページ内の実際の文字位置から行を作る。
+    words = load_words(page, 205, float(page.rect.height))
+    row_centers = cluster_rows(words, tolerance=2.8)
+    if not row_centers:
+        return [["\u9805\u76ee", "", "", "\u6570\u91cf", "\u5358\u4f4d", "\u5358\u4fa1", "\u91d1\u984d", "\u5099\u8003"]]
 
     rows: dict[float, dict[int, list[tuple[float, str]]]] = {
         row: {i: [] for i in range(1, 8)} for row in row_centers
@@ -265,7 +249,7 @@ def build_detail_rows(page: fitz.Page) -> list[list[str]]:
             col = 7
         rows[row][col].append((w.x0, w.text))
 
-    ordered_rows: list[list[str]] = [["大項目", "品目", "単価", "数量", "単位", "金額", "備考"]]
+    ordered_rows: list[list[str]] = [["\u9805\u76ee", "", "", "\u6570\u91cf", "\u5358\u4f4d", "\u5358\u4fa1", "\u91d1\u984d", "\u5099\u8003"]]
     for row_y in sorted(rows):
         cols = rows[row_y]
         values = []
@@ -273,12 +257,7 @@ def build_detail_rows(page: fitz.Page) -> list[list[str]]:
             parts = [text for _, text in sorted(cols[idx], key=lambda item: item[0])]
             values.append("".join(parts).strip())
         if any(values):
-            # 備考欄の折り返しだけでできた行は、前の行の備考へ結合する。
-            if (
-                len(ordered_rows) > 1
-                and not any(values[:6])
-                and values[6]
-            ):
+            if len(ordered_rows) > 1 and not any(values[:6]) and values[6]:
                 prev = ordered_rows[-1]
                 prev[6] = (prev[6] + " " + values[6]).strip() if prev[6] else values[6]
                 continue
@@ -286,12 +265,51 @@ def build_detail_rows(page: fitz.Page) -> list[list[str]]:
     return ordered_rows
 
 
-def append_teisoh_misc_row(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
+def extract_teisoh_misc_amount(page: fitz.Page) -> str:
+    try:
+        words = page.get_text("words") or []
+        label_words = [
+            (float(w[0]), float(w[1]))
+            for w in words
+            if str(w[4]).strip() in {"諸経費", "諸経費用"}
+        ]
+        numeric_words = [
+            (float(w[0]), float(w[1]), str(w[4]).strip())
+            for w in words
+            if re.fullmatch(r"[0-9,]+(?:円)?", str(w[4]).strip())
+        ]
+        for x0, y0 in label_words:
+            same_row = [
+                (x, text)
+                for x, y, text in numeric_words
+                if abs(y - y0) <= 8 and x > x0
+            ]
+            if same_row:
+                return re.sub(r"[^\d,]", "", sorted(same_row, key=lambda item: item[0])[0][1])
+    except Exception:
+        pass
+
+    return ""
+
+
+def is_teisoh_subtotal_row(row: pd.Series) -> bool:
+    label = "".join(str(row.get(col, "")).strip() for col in ["A", "B"]).replace(" ", "")
+    return label == "小計"
+
+
+def is_teisoh_subtotal_output_row(values: list[object]) -> bool:
+    text = "".join(str(v).strip() for v in values).replace(" ", "")
+    if "小計" in text:
+        return True
+    return "小" in text and "計" in text
+
+
+def append_teisoh_misc_row_from_amount(df: pd.DataFrame, amount_text: str) -> pd.DataFrame:
+    if df.empty or not amount_text:
         return df
     misc_row = pd.DataFrame(
-        [["", "諸経費", 56000, 1, "式", 56000, ""]],
-        columns=df.columns[:7],
+        [["諸経費", "", "", "1", "式", amount_text, amount_text, ""]],
+        columns=df.columns,
     )
     return pd.concat([df, misc_row], ignore_index=True)
 
@@ -338,15 +356,16 @@ def load_teisoh_detail_df(pdf_path: str) -> pd.DataFrame:
     doc = fitz.open(pdf_path)
     try:
         detail_rows: list[list[str]] = []
-        if len(doc) > 1:
-            for page_index in range(1, len(doc)):
-                page_rows = build_detail_rows(doc[page_index])
-                if not page_rows:
-                    continue
-                if not detail_rows:
-                    detail_rows.extend(page_rows)
-                else:
-                    detail_rows.extend(page_rows[1:])
+        # 1ページ目は表紙なので、2ページ目以降だけを明細として読む。
+        for page_index in range(1, len(doc)):
+            page_rows = build_detail_rows(doc[page_index])
+            if not page_rows:
+                continue
+            if not detail_rows:
+                detail_rows.extend(page_rows)
+            else:
+                detail_rows.extend(page_rows[1:])
+        misc_amount = extract_teisoh_misc_amount(doc[0]) if len(doc) > 0 else ""
     finally:
         doc.close()
 
@@ -360,15 +379,16 @@ def load_teisoh_detail_df(pdf_path: str) -> pd.DataFrame:
     )
     source_df["D"] = split_pairs[0]
     source_df["C"] = split_pairs[1]
+    source_df = source_df[~source_df.apply(is_teisoh_subtotal_row, axis=1)].reset_index(drop=True)
 
-    output_rows: list[list[str]] = [["品目", "", "", "数量", "単位", "単価", "金額", "備考"]]
+    output_rows: list[list[str]] = [["項目", "", "", "数量", "単位", "単価", "金額", "備考"]]
     for _, row in source_df.iterrows():
-        item = str(row["B"]).strip()
-        if not item:
+        item_text = str(row["B"]).strip()
+        if not item_text:
             continue
         output_rows.append(
             [
-                item,
+                item_text,
                 "",
                 "",
                 str(row["D"]).strip(),
@@ -379,14 +399,13 @@ def load_teisoh_detail_df(pdf_path: str) -> pd.DataFrame:
             ]
         )
 
-    output_rows.append(["諸経費", "", "", "1", "式", "56000", "56000", ""])
+    output_rows = [output_rows[0]] + [row for row in output_rows[1:] if not is_teisoh_subtotal_output_row(row)]
+
     df = pd.DataFrame(output_rows, columns=["A", "B", "C", "D", "E", "F", "G", "H"])
+    if misc_amount:
+        df = append_teisoh_misc_row_from_amount(df, misc_amount)
     df.index += 1
     return df
-
-
-
-# ここから下が Streamlit のUI（関数の外）
 st.set_page_config(page_title="Excel転記アプリ", layout="wide")
 
 
@@ -1198,3 +1217,4 @@ if "result_path" in st.session_state:
 
 
                 # --- ★ ここまで転記UI ---
+
