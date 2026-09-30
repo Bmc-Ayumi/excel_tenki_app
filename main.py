@@ -6,6 +6,14 @@ from openpyxl.styles import Alignment
 from openpyxl.styles import PatternFill
 import fitz
 import tempfile
+from weberton import (
+    COLUMNS as WEBERTON_COLUMNS,
+    TRANSFER_COL_MAP as WEBERTON_COL_MAP,
+    extract_weberton_pdf,
+    validate_amounts as validate_weberton_amounts,
+    prepare_csv_rows as prepare_weberton_rows,
+    build_transfer_df as build_weberton_transfer_df,
+)
 import os
 from openpyxl import load_workbook
 import pyexcel as p
@@ -140,7 +148,9 @@ def write_df_to_template_com(
 
 
 def get_col_map(company: str) -> dict:
-    if company in ["オフィス（１シート）", "オフィス（複数シート）"]:
+    if company == "ウェバートンPDF":
+        return WEBERTON_COL_MAP.copy()
+    elif company in ["オフィス（１シート）", "オフィス（複数シート）"]:
         return {
             "B": "C",  # 名称 ← 確定
             "C": "D",  # 商品記号
@@ -895,7 +905,7 @@ def comany(xlsx_path):
 # ▼ 既存UI
 company = st.sidebar.selectbox(
     "仕入先を選択してください",
-    ["オフィス（１シート）", "オフィス（複数シート）", "コマニー", "帝国倉庫PDF"]
+    ["オフィス（１シート）", "オフィス（複数シート）", "コマニー", "帝国倉庫PDF", "ウェバートンPDF"]
 )
 # 仕入先変更を検知
 prev_company = st.session_state.get("prev_company")
@@ -928,8 +938,9 @@ elif prev_company != company:
 
 uploader_reset_counter = st.session_state.get("uploader_reset_counter", 0)
 
-supplier_file_type = ["pdf"] if company == "帝国倉庫PDF" else ["xls", "xlsx"]
-supplier_file_label = "仕入先PDFファイルをアップロードしてください" if company == "帝国倉庫PDF" else "仕入先ファイル（xls/.xlsx）をアップロードしてください"
+is_pdf_supplier = company in ("帝国倉庫PDF", "ウェバートンPDF")
+supplier_file_type = ["pdf"] if is_pdf_supplier else ["xls", "xlsx"]
+supplier_file_label = "仕入先PDFファイルをアップロードしてください" if is_pdf_supplier else "仕入先ファイル（xls/.xlsx）をアップロードしてください"
 
 supplier_file = st.file_uploader(
     supplier_file_label,
@@ -947,7 +958,19 @@ if supplier_file:
     ext = os.path.splitext(supplier_file.name)[1].lower()
     supplier_file_bytes = supplier_file.getvalue()
     raw_path = save_uploaded_bytes(supplier_file_bytes, suffix=ext)
-    if company == "帝国倉庫PDF":
+    if company == "ウェバートンPDF":
+        try:
+            weberton_records = extract_weberton_pdf(raw_path)
+            validate_weberton_amounts(weberton_records)
+            df_converted = pd.DataFrame(prepare_weberton_rows(weberton_records), columns=WEBERTON_COLUMNS)
+        except (OSError, ValueError, RuntimeError) as exc:
+            st.error(f"ウェバートンPDFの抽出に失敗しました: {exc}")
+            st.stop()
+        converted_excel_path = os.path.join(APP_TEMP_DIR, "weberton_pdf_converted.xlsx")
+        with pd.ExcelWriter(converted_excel_path, engine="openpyxl") as writer:
+            df_converted.to_excel(writer, sheet_name="ウェバートンPDF", index=False)
+        preview_sheet_name = "ウェバートンPDF"
+    elif company == "帝国倉庫PDF":
         df_converted = load_teisoh_detail_df(raw_path)
         converted_excel_path = os.path.join(APP_TEMP_DIR, "teisoh_pdf_converted.xlsx")
         with pd.ExcelWriter(converted_excel_path, engine="openpyxl") as writer:
@@ -1066,6 +1089,8 @@ elif df_converted is not None and st.session_state.template_wb:
     # --- ★ ここから転記UI ---
     st.markdown("### 転記設定（開始セルと転記先セルを入力）")
 
+    if company == "ウェバートンPDF":
+        st.session_state.setdefault("src_cell", "C2")
     src = st.text_input("転記元の開始セル（例: C14）", key="src_cell")
     dest = st.text_input("転記先セル（例: B3）", key="dest_cell")
     output_name = st.text_input("出力ファイル名（拡張子不要）", value="merged_result", key="output_name")
@@ -1090,6 +1115,8 @@ elif df_converted is not None and st.session_state.template_wb:
 
         try:
             src_row = get_row_from_cell(src)
+            if company == "ウェバートンPDF":
+                src_row = max(2, src_row)  # 1行目の列名は転記しない
             df_to_write = df_converted.loc[src_row:].copy()
 
             cols_check = [c for c in ["A","B","C","D","E","F"] if c in df_to_write.columns]
@@ -1101,6 +1128,15 @@ elif df_converted is not None and st.session_state.template_wb:
                     .eq("")
                     .all(axis=1)
                 ]
+
+            if company == "ウェバートンPDF":
+                source_columns = {
+                    get_column_letter(i + 1): name
+                    for i, name in enumerate(WEBERTON_COLUMNS)
+                }
+                df_to_write = build_weberton_transfer_df(
+                    df_to_write.rename(columns=source_columns).to_dict("records")
+                )
 
             # ここで必ず「今画面に入っている値」を取り直す
             output_name = (st.session_state.get("output_name") or "merged_result").strip()
