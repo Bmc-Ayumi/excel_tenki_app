@@ -1,10 +1,8 @@
 import streamlit as st
-import openpyxl
-from dataclasses import dataclass
+from office import office_int, office_int_multi, TRANSFER_COL_MAP as OFFICE_COL_MAP
+from comany import comany, TRANSFER_COL_MAP as COMANY_COL_MAP
+from teisoh import load_teisoh_detail_df, TRANSFER_COL_MAP as TEISOH_COL_MAP
 from openpyxl.utils import column_index_from_string, get_column_letter
-from openpyxl.styles import Alignment
-from openpyxl.styles import PatternFill
-import fitz
 import tempfile
 from weberton import (
     COLUMNS as WEBERTON_COLUMNS,
@@ -17,8 +15,6 @@ from weberton import (
 import os
 from openpyxl import load_workbook
 import pyexcel as p
-from pyexcel import save_book_as
-import mojimoji
 import re
 import pandas as pd
 import win32com.client as win32
@@ -145,277 +141,19 @@ def write_df_to_template_com(
         pythoncom.CoUninitialize()
 
 
-
-
 def get_col_map(company: str) -> dict:
-    if company == "ウェバートンPDF":
-        return WEBERTON_COL_MAP.copy()
-    elif company in ["オフィス（１シート）", "オフィス（複数シート）"]:
-        return {
-            "B": "C",  # 名称 ← 確定
-            "C": "D",  # 商品記号
-            "D": "E",  # 使用
-            "E": "F",  # 数量
-            "F": "G",  # 単位
-            "K": "H",  # 単価
-            
-        }
-    elif company == "帝国倉庫PDF":
-        return {
-            "B": "A",  # 品目
-            "E": "D",  # 数量
-            "F": "E",  # 単位
-            "K": "F",  # 単価
-            "I": "H",  # 備考
-        }
-    elif company == "コマニー":
-        return {
-            "B": "A",  # 名称
-            "D": "C",  # 仕様・寸法 ← W寸法をここへ
-            "E": "D",  # 数量
-            "F": "E",  # 単位
-            "K": "F",  # 単価
-            "I": "H",  # 備考に案件番号を入れたいなら（必要なら追加）
-        }
-
-    else:
-        raise ValueError(f"未対応の仕入先です: {company}")
-
-
-@dataclass(frozen=True)
-class Word:
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-    text: str
-
-
-def _word_close(a: Word, b: Word, tolerance: float = 2.0) -> bool:
-    return (
-        abs(a.x0 - b.x0) <= tolerance
-        and abs(a.y0 - b.y0) <= tolerance
-        and abs(a.x1 - b.x1) <= tolerance
-        and abs(a.y1 - b.y1) <= tolerance
-    )
-
-
-def _dedupe_words(words: list[Word]) -> list[Word]:
-    deduped: list[Word] = []
-    for w in sorted(words, key=lambda item: (round(item.y0, 1), item.x0, item.text)):
-        if any(_word_close(w, existing) for existing in deduped):
-            continue
-        deduped.append(w)
-    return deduped
-
-
-def load_words(page: fitz.Page, y_min: float, y_max: float) -> list[Word]:
-    words: list[Word] = []
-    for x0, y0, x1, y1, text, *_rest in page.get_text("words"):
-        if y_min <= y0 <= y_max:
-            words.append(Word(float(x0), float(y0), float(x1), float(y1), str(text)))
-    return words
-
-
-def cluster_rows(words: list[Word], tolerance: float = 2.8) -> list[float]:
-    ys = sorted({round(w.y0, 1) for w in words})
-    rows: list[float] = []
-    for y in ys:
-        if not rows or abs(y - rows[-1]) > tolerance:
-            rows.append(y)
-    return rows
-
-
-def row_for_y(y: float, rows: list[float]) -> float:
-    return min(rows, key=lambda row_y: abs(row_y - y))
-
-
-def build_detail_rows(page: fitz.Page) -> list[list[str]]:
-    # 固定の行座標に頼らず、ページ内の実際の文字位置から行を作る。
-    words = load_words(page, 205, float(page.rect.height))
-    row_centers = cluster_rows(words, tolerance=2.8)
-    if not row_centers:
-        return [["\u9805\u76ee", "", "", "\u6570\u91cf", "\u5358\u4f4d", "\u5358\u4fa1", "\u91d1\u984d", "\u5099\u8003"]]
-
-    rows: dict[float, dict[int, list[tuple[float, str]]]] = {
-        row: {i: [] for i in range(1, 8)} for row in row_centers
+    maps = {
+        "オフィス（１シート）": OFFICE_COL_MAP,
+        "オフィス（複数シート）": OFFICE_COL_MAP,
+        "コマニー": COMANY_COL_MAP,
+        "帝国倉庫PDF": TEISOH_COL_MAP,
+        "ウェバートンPDF": WEBERTON_COL_MAP,
     }
-
-    for w in words:
-        row = row_for_y(w.y0, row_centers)
-        if w.x0 < 90:
-            col = 1
-        elif w.x0 < 220:
-            col = 2
-        elif w.x0 < 300:
-            col = 3
-        elif w.x0 < 335:
-            col = 4
-        elif w.x0 < 390:
-            col = 5
-        elif w.x0 < 455:
-            col = 6
-        else:
-            col = 7
-        rows[row][col].append((w.x0, w.text))
-
-    ordered_rows: list[list[str]] = [["\u9805\u76ee", "", "", "\u6570\u91cf", "\u5358\u4f4d", "\u5358\u4fa1", "\u91d1\u984d", "\u5099\u8003"]]
-    for row_y in sorted(rows):
-        cols = rows[row_y]
-        values = []
-        for idx in range(1, 8):
-            parts = [text for _, text in sorted(cols[idx], key=lambda item: item[0])]
-            values.append("".join(parts).strip())
-        if any(values):
-            if len(ordered_rows) > 1 and not any(values[:6]) and values[6]:
-                prev = ordered_rows[-1]
-                prev[6] = (prev[6] + " " + values[6]).strip() if prev[6] else values[6]
-                continue
-            ordered_rows.append(values)
-    return ordered_rows
+    if company not in maps:
+        raise ValueError(f"未対応の仕入先です: {company}")
+    return maps[company].copy()
 
 
-def extract_teisoh_misc_amount(page: fitz.Page) -> str:
-    try:
-        words = page.get_text("words") or []
-        label_words = [
-            (float(w[0]), float(w[1]))
-            for w in words
-            if str(w[4]).strip() in {"諸経費", "諸経費用"}
-        ]
-        numeric_words = [
-            (float(w[0]), float(w[1]), str(w[4]).strip())
-            for w in words
-            if re.fullmatch(r"[0-9,]+(?:円)?", str(w[4]).strip())
-        ]
-        for x0, y0 in label_words:
-            same_row = [
-                (x, text)
-                for x, y, text in numeric_words
-                if abs(y - y0) <= 8 and x > x0
-            ]
-            if same_row:
-                return re.sub(r"[^\d,]", "", sorted(same_row, key=lambda item: item[0])[0][1])
-    except Exception:
-        pass
-
-    return ""
-
-
-def is_teisoh_subtotal_row(row: pd.Series) -> bool:
-    label = "".join(str(row.get(col, "")).strip() for col in ["A", "B"]).replace(" ", "")
-    return label == "小計"
-
-
-def is_teisoh_subtotal_output_row(values: list[object]) -> bool:
-    text = "".join(str(v).strip() for v in values).replace(" ", "")
-    if "小計" in text:
-        return True
-    return "小" in text and "計" in text
-
-
-def append_teisoh_misc_row_from_amount(df: pd.DataFrame, amount_text: str) -> pd.DataFrame:
-    if df.empty or not amount_text:
-        return df
-    misc_row = pd.DataFrame(
-        [["諸経費", "", "", "1", "式", amount_text, amount_text, ""]],
-        columns=df.columns,
-    )
-    return pd.concat([df, misc_row], ignore_index=True)
-
-
-def normalize_teisoh_item_name(value: object) -> object:
-    if not isinstance(value, str):
-        return value
-
-    text = value.strip()
-    if text == "2t":
-        return "2t車"
-    if text == "4t":
-        return "4t車"
-    return text
-
-
-def split_merged_quantity_and_price(quantity: object, unit_price: object) -> tuple[object, object]:
-    def _split(value: object) -> tuple[str, str]:
-        if not isinstance(value, str):
-            return "", ""
-        text = value.strip().replace(" ", "")
-        m = re.match(r"^(-?\d{1,3})(\d{1,3}(?:,\d{3})+)$", text)
-        if not m:
-            return "", ""
-        return m.group(1), m.group(2)
-
-    quantity_text = "" if quantity is None else str(quantity).strip()
-    unit_price_text = "" if unit_price is None else str(unit_price).strip()
-
-    if quantity_text and not unit_price_text:
-        q, p = _split(quantity_text)
-        if q and p:
-            return q, p
-
-    if unit_price_text and not quantity_text:
-        q, p = _split(unit_price_text)
-        if q and p:
-            return q, p
-
-    return quantity, unit_price
-
-
-def load_teisoh_detail_df(pdf_path: str) -> pd.DataFrame:
-    doc = fitz.open(pdf_path)
-    try:
-        detail_rows: list[list[str]] = []
-        # 1ページ目は表紙なので、2ページ目以降だけを明細として読む。
-        for page_index in range(1, len(doc)):
-            page_rows = build_detail_rows(doc[page_index])
-            if not page_rows:
-                continue
-            if not detail_rows:
-                detail_rows.extend(page_rows)
-            else:
-                detail_rows.extend(page_rows[1:])
-        misc_amount = extract_teisoh_misc_amount(doc[0]) if len(doc) > 0 else ""
-    finally:
-        doc.close()
-
-    source_df = pd.DataFrame(detail_rows[1:], columns=["A", "B", "C", "D", "E", "F", "G"]).fillna("")
-    source_df["B"] = source_df["B"].map(normalize_teisoh_item_name)
-
-    split_pairs = source_df.apply(
-        lambda row: split_merged_quantity_and_price(row["D"], row["C"]),
-        axis=1,
-        result_type="expand",
-    )
-    source_df["D"] = split_pairs[0]
-    source_df["C"] = split_pairs[1]
-    source_df = source_df[~source_df.apply(is_teisoh_subtotal_row, axis=1)].reset_index(drop=True)
-
-    output_rows: list[list[str]] = [["項目", "", "", "数量", "単位", "単価", "金額", "備考"]]
-    for _, row in source_df.iterrows():
-        item_text = str(row["B"]).strip()
-        if not item_text:
-            continue
-        output_rows.append(
-            [
-                item_text,
-                "",
-                "",
-                str(row["D"]).strip(),
-                str(row["E"]).strip(),
-                str(row["C"]).strip(),
-                str(row["F"]).strip(),
-                str(row["G"]).strip(),
-            ]
-        )
-
-    output_rows = [output_rows[0]] + [row for row in output_rows[1:] if not is_teisoh_subtotal_output_row(row)]
-
-    df = pd.DataFrame(output_rows, columns=["A", "B", "C", "D", "E", "F", "G", "H"])
-    if misc_amount:
-        df = append_teisoh_misc_row_from_amount(df, misc_amount)
-    df.index += 1
-    return df
 st.set_page_config(page_title="Excel転記アプリ", layout="wide")
 
 
@@ -524,381 +262,6 @@ def convert_xls_to_xlsx(xls_path):
     p.save_book_as(file_name=xls_path, dest_file_name=xlsx_path)
     return xlsx_path
 
-def get_data_until_blank(ws, start_col, start_row):
-    data = []
-    row = start_row
-    while row <= ws.max_row:
-        cell_val = ws.cell(row=row, column=start_col).value
-        data.append((row, cell_val))
-        row += 1
-    return data
-def normalize_sheet_name(name: str) -> str:
-    # 全角数字を半角に寄せる（例：３→3）
-    try:
-        return mojimoji.zen_to_han(name)
-    except Exception:
-        return name
-
-
-def consolidate_selected_sheets(wb, target_sheet_names, add_blank_row=True):
-    """
-    target_sheet_names の先頭シートに、2枚目以降のデータを追記して1枚にまとめる
-    """
-    if not target_sheet_names or len(target_sheet_names) <= 1:
-        return
-
-    base_ws = wb[target_sheet_names[0]]
-
-    def is_row_blank(ws, r, max_col):
-        for c in range(1, max_col + 1):
-            v = ws.cell(row=r, column=c).value
-            if v is not None and str(v).strip() != "":
-                return False
-        return True
-
-    base_max_col = base_ws.max_column
-    base_last = base_ws.max_row
-    while base_last > 1 and is_row_blank(base_ws, base_last, base_max_col):
-        base_last -= 1
-    write_row = base_last + 1
-
-    for src_name in target_sheet_names[1:]:
-        if src_name not in wb.sheetnames:
-            continue
-
-        src_ws = wb[src_name]
-        max_col = max(base_max_col, src_ws.max_column)
-
-        for r in range(1, src_ws.max_row + 1):
-            row_vals = []
-            all_blank = True
-
-            for c in range(1, max_col + 1):
-                v = src_ws.cell(row=r, column=c).value
-                row_vals.append(v)
-                if v is not None and str(v).strip() != "":
-                    all_blank = False
-
-            if all_blank:
-                continue
-
-            for c, v in enumerate(row_vals, start=1):
-                base_ws.cell(row=write_row, column=c).value = v
-
-            write_row += 1
-
-        if add_blank_row:
-            write_row += 1
-
-        wb.remove(src_ws)
-
-
-def office_int_multi(xlsx_path: str, start_sheet_name: str):
-    """
-    オフィスインテリア（複数シート版）
-    ・プルダウンで選んだシート以降を処理
-    ・不要行削除、文字整形、単価補完、列削除
-    ・最後に対象シートを1枚に統合
-    """
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-
-    all_sheet_names = wb.sheetnames
-
-    if start_sheet_name not in all_sheet_names:
-        wb.close()
-        raise ValueError(f"指定した開始シートが見つかりません: {start_sheet_name}")
-
-    start_idx = all_sheet_names.index(start_sheet_name)
-
-    # ★ 選択したシート以降をすべて対象にする
-    target_sheet_names = all_sheet_names[start_idx:]
-
-    if not target_sheet_names:
-        wb.close()
-        raise ValueError("処理対象シートがありません")
-
-    target_sheets = [wb[name] for name in target_sheet_names]
-
-    for ws in target_sheets:
-        # 0) 行削除
-        for r in range(ws.max_row, 0, -1):
-            b_val = get_cell_value_with_merge(ws, r, 2)
-            b_norm = normalize_text(b_val)
-
-            c_val = get_cell_value_with_merge(ws, r, 3)
-            c_norm = normalize_text(c_val)
-
-            cm_all_empty = True
-            for col in range(3, 14):  # C～M
-                v = get_cell_value_with_merge(ws, r, col)
-                if normalize_text(v) != "":
-                    cm_all_empty = False
-                    break
-
-            hi_text = ""
-            for col in (8, 9, 10, 11):  # H, I, J, K
-                hi_text += normalize_text(get_cell_value_with_merge(ws, r, col))
-
-            if (
-                ("件名" in b_norm)
-                or ("名称" in b_norm)
-                or ("合計" in c_norm)
-                or ("内訳書" in hi_text or "内訳明細書" in hi_text)
-                or cm_all_empty
-            ):
-                ws.delete_rows(r)
-
-        # ① C列・I列の先頭スペース削除
-        for row in range(1, ws.max_row + 1):
-            v = get_cell_value_with_merge(ws, row, 3)  # C
-            if isinstance(v, str):
-                ws.cell(row=row, column=3).value = v.lstrip(" 　")
-
-            v = get_cell_value_with_merge(ws, row, 9)  # I
-            if isinstance(v, str):
-                ws.cell(row=row, column=9).value = v.lstrip(" 　")
-
-        # ② L列が空欄ならM列をコピー（ただしC列が小計は除外）
-        for row in range(1, ws.max_row + 1):
-            c_val = get_cell_value_with_merge(ws, row, 3)   # C
-            l_val = get_cell_value_with_merge(ws, row, 12)  # L
-            m_val = get_cell_value_with_merge(ws, row, 13)  # M
-
-            c_norm2 = normalize_text(c_val)
-            c_norm2 = re.sub(r"[（）\(\)【】\[\]{}]", "", c_norm2)
-
-            if "小計" in c_norm2:
-                continue
-
-            if normalize_text(l_val) == "" and m_val is not None:
-                ws.cell(row=row, column=12).value = m_val
-
-        # ③ EFG列を削除
-        ws.delete_cols(5, 3)
-
-        # ④ さらにE列を削除
-        ws.delete_cols(5)
-
-    # ★ 選択したシート以降を、先頭シートに統合
-    consolidate_selected_sheets(wb, target_sheet_names, add_blank_row=True)
-
-    output_path = xlsx_path.replace(".xlsx", "_office_multi_converted.xlsx")
-    wb.save(output_path)
-    wb.close()
-    return output_path
-def get_cell_value_with_merge(ws, row, col):
-    """
-    結合セル対応：
-    指定セルが結合範囲内なら、左上セルの値を返す
-    """
-    cell = ws.cell(row=row, column=col)
-    if cell.value is not None:
-        return cell.value
-
-    for merged_range in ws.merged_cells.ranges:
-        if cell.coordinate in merged_range:
-            return ws.cell(
-                row=merged_range.min_row,
-                column=merged_range.min_col
-            ).value
-    return None
-
-
-def normalize_text(v):
-    """半角・全角スペースを除去（Noneは空扱い）"""
-    if v is None:
-        return ""
-    if not isinstance(v, str):
-        v = str(v)
-    return re.sub(r"[\s\u3000]+", "", v)
-
-
-
-# --- 各社変換処理 ---
-def office_int(xlsx_path):
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    ws = wb.active
-    rows_to_delete = [idx for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2)
-                      if row[1] is None or not isinstance(row[1], (int, float))]
-    for idx in sorted(rows_to_delete, reverse=True):
-        ws.delete_rows(idx)
-
-    ws.delete_cols(17)
-    ws.delete_cols(15)
-    ws.delete_cols(13)
-    ws.delete_cols(8, 2)
-    ws.delete_cols(4, 3)
-    ws.insert_cols(4)
-
-    pattern_total = re.compile(r'\b小\s*計\b')
-    pattern_mid_total = re.compile(r'\b中\s*計\b')  # ★ 追加
-    pattern_discount = re.compile(r'\b値\s*引\b')
-
-    
-    for row in ws.iter_rows(min_row=2):
-        h_cell = row[7]
-        c_cell = row[2]
-    
-        # ★ C列が完全に空白の行は処理しないで次へ進む
-        if c_cell.value is None:
-            continue
-
-        c_text = str(c_cell.value)
-
-        # ★ 中計 も 小計 と同様に除外する
-        if (
-            (h_cell.value is None)
-            and (not pattern_total.search(c_text))
-            and (not pattern_mid_total.search(c_text))   # ← ここ追加
-            and (not pattern_discount.search(c_text))
-        ):
-            h_cell.value = row[8].value
-    for row in ws.iter_rows(min_row=2):
-        for cell in row[2:5]:
-            if cell.value is not None and isinstance(cell.value, str):
-                cell.value = cell.value.strip()
-
-    output_path = xlsx_path.replace(".xlsx", "_converted.xlsx")
-    wb.save(output_path)
-    wb.close()
-    return output_path
-
-def comany(xlsx_path):
-    # もし拡張子が .xls なら .xlsx に変換
-    if xlsx_path.lower().endswith(".xls"):
-        xlsx_converted = xlsx_path + "x"
-        save_book_as(file_name=xlsx_path, dest_file_name=xlsx_converted)
-        xlsx_path = xlsx_converted
-
-    wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-    if "内訳書" not in wb.sheetnames:
-        wb.close()
-        return None
-    ws = wb["内訳書"]
-    max_row = ws.max_row
-
-    col = dict(b=2, c=3, f=6, g=7, i=9, j=10, k=11, l=12, m=13, n=14, o=15)
-
-    # --- W/D/HをまとめてI列に出力 ---
-    def fmt_dim(v):
-        if v is None:
-            return None
-        try:
-            f = float(v)
-            return str(int(f)) if f.is_integer() else str(f)
-        except:
-            return str(v)
-
-    def nonzero(v):
-        if v in (None, "", 0, 0.0):
-            return False
-        try:
-            return float(v) != 0
-        except:
-            return True
-
-    for r in range(2, max_row + 1):
-        w = ws.cell(r, col["i"]).value
-        d = ws.cell(r, col["j"]).value
-        h = ws.cell(r, col["k"]).value
-        if w or d or h:
-            merged = ""
-            if nonzero(w): merged += f"W{fmt_dim(w)}"
-            if nonzero(d): merged += f"D{fmt_dim(d)}"
-            if nonzero(h): merged += f"H{fmt_dim(h)}"
-            ws.cell(r, col["i"]).value = merged
-            ws.merge_cells(start_row=r, start_column=col["i"], end_row=r, end_column=col["k"])
-            ws.cell(r, col["i"]).alignment = Alignment(horizontal="left", vertical="center")
-
-    # --- 【】内の文字をF列に抽出 ---
-    pattern = re.compile(r"【(.*?)】")
-    for r in range(2, max_row + 1):
-        g_val = ws.cell(r, col["g"]).value
-        g_str = str(g_val) if g_val else ""
-        match = pattern.search(g_str)
-        if match:
-            ws.cell(r, col["f"]).value = match.group(1)
-
-        if "施工" in g_str:
-            l_val = ws.cell(r, col["l"]).value
-            m_val = ws.cell(r, col["m"]).value
-            try:
-                merged = f"{float(l_val):.1f}{m_val}"
-            except:
-                merged = f"{l_val}{m_val}"
-            ws.cell(r, col["i"]).value = merged
-            ws.cell(r, col["l"]).value = 1
-            ws.cell(r, col["m"]).value = "式"
-
-    # --- ■や◆のある行をF列に転記 ---
-    for r in range(2, max_row + 1):
-        b_val = ws.cell(r, col["b"]).value
-        c_val = ws.cell(r, col["c"]).value
-        if b_val and "■" in str(b_val):
-            ws.cell(r, col["f"]).value = mojimoji.han_to_zen(str(b_val))
-        if c_val and "◆" in str(c_val):
-            ws.cell(r, col["f"]).value = mojimoji.han_to_zen(str(c_val))
-
-    # --- N列が空でO列が0以外 → NにOをコピー ---
-    for r in range(2, max_row + 1):
-        n_val = ws.cell(r, col["n"]).value
-        o_val = ws.cell(r, col["o"]).value
-        if (n_val is None or str(n_val).strip() == "") and nonzero(o_val):
-            ws.cell(r, col["n"]).value = o_val
-
-    # --- 列削除と挿入（元コードと同じ順序）---
-    ws.delete_cols(10, 2)
-    ws.delete_cols(7, 2)
-    ws.delete_cols(1, 5)
-    ws.insert_cols(2)
-
-    # ★★★ A列が「部材」の行を特別処理 ★★★
-    for r in range(2, ws.max_row + 1):
-        a_val = ws.cell(r, 1).value  # A列（列削除後）
-        if isinstance(a_val, str) and a_val.strip() == "部材":
-            ws.cell(r, 1).value = "部材合計"
-            for c in range(4, 8):  # D〜G
-                ws.cell(r, c).value = None
-    # ★★★ 完全な空行を削除（A〜H すべて空なら削除） ★★★
-    for r in range(ws.max_row, 1, -1):  # 逆順で消す
-        if all(ws.cell(r, c).value in (None, "") for c in range(1, 9)):  # A〜H列をチェック
-            ws.delete_rows(r)
-
-
-    # --- 不要シート削除（内訳書だけ残す）---
-    for name in list(wb.sheetnames):
-        if name != "内訳書":
-            wb.remove(wb[name])
-
-    output_path = xlsx_path.replace(".xlsx", "_comany_converted.xlsx")
-    wb.save(output_path)
-    wb.close()
-    return output_path
-
-
-# def soken(xlsx_path):
-#     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
-#     ws = wb.active
-#     for row in range(ws.max_row, 0, -1):
-#         if all(ws.cell(row=row, column=col).value is None for col in range(1, ws.max_column + 1)):
-#             ws.delete_rows(row)
-#     ws.delete_rows(1, 8)
-#     ws['N1'] = '単　価'
-
-#     rows_to_delete = [idx for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2)
-#                       if row[2] == '名　　　称']
-#     for idx in sorted(rows_to_delete, reverse=True):
-#         ws.delete_rows(idx)
-
-#     pattern = re.compile(r"頁")
-#     for idx, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
-#         if pattern.search(str(row[17])):
-#             ws.delete_rows(idx)
-
-#     output_path = xlsx_path.replace(".xlsx", "_converted.xlsx")
-#     wb.save(output_path)
-#     wb.close()
-#     return output_path
 
 # --- UI ---
 
@@ -1030,7 +393,6 @@ if supplier_file:
     df_converted = df_converted.fillna("")
 
 
-
 # ★「初回だけ」テンプレを確定させる（2回目以降の rerun では上書きしない）
 # テンプレは「新規モード」では毎回これを基準にしたいので、アップロードがあれば更新してOK
 if template_file:
@@ -1084,13 +446,9 @@ elif df_converted is not None and st.session_state.template_wb:
             )
 
 
-
-
     # --- ★ ここから転記UI ---
     st.markdown("### 転記設定（開始セルと転記先セルを入力）")
 
-    if company == "ウェバートンPDF":
-        st.session_state.setdefault("src_cell", "C2")
     src = st.text_input("転記元の開始セル（例: C14）", key="src_cell")
     dest = st.text_input("転記先セル（例: B3）", key="dest_cell")
     output_name = st.text_input("出力ファイル名（拡張子不要）", value="merged_result", key="output_name")
@@ -1217,8 +575,6 @@ elif df_converted is not None and st.session_state.template_wb:
             release_lock()
 
 
-
-
 # ★ 一括転記後だけ、ダウンロードボタンを表示
 if "result_path" in st.session_state:
     # いま画面に入っている出力名を「DL名」に反映（転記後に変えてもOK）
@@ -1246,10 +602,6 @@ if "result_path" in st.session_state:
 
     st.write("保存先:", st.session_state.get("result_path"))
     st.write("DL名:", dl_name)
-
-
-
-
 
 
                 # --- ★ ここまで転記UI ---
