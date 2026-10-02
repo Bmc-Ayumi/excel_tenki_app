@@ -1,5 +1,6 @@
 """オフィス見積の加工（1シート・複数シート）と転記列対応。"""
 import re
+import math
 import openpyxl
 import mojimoji
 
@@ -144,7 +145,7 @@ def office_int_multi(xlsx_path: str, start_sheet_name: str):
             if isinstance(v, str):
                 ws.cell(row=row, column=9).value = v.lstrip(" 　")
 
-        # ② L列が空欄ならM列をコピー（ただしC列が小計は除外）
+        # ② 単価を金額から補完。「式」は金額÷数量（小計は除外）。
         for row in range(1, ws.max_row + 1):
             c_val = get_cell_value_with_merge(ws, row, 3)   # C
             l_val = get_cell_value_with_merge(ws, row, 12)  # L
@@ -157,7 +158,11 @@ def office_int_multi(xlsx_path: str, start_sheet_name: str):
                 continue
 
             if normalize_text(l_val) == "" and m_val is not None:
-                ws.cell(row=row, column=12).value = m_val
+                ws.cell(row=row, column=12).value = supplement_unit_price(
+                    m_val,
+                    get_cell_value_with_merge(ws, row, 10),  # J: 数量
+                    get_cell_value_with_merge(ws, row, 11),  # K: 単位
+                )
 
         # ③ EFG列を削除
         ws.delete_cols(5, 3)
@@ -201,6 +206,20 @@ def normalize_text(v):
     return re.sub(r"[\s\u3000]+", "", v)
 
 
+def supplement_unit_price(amount, quantity, unit):
+    """式単価は金額を数量で割る。それ以外の単位は従来どおり金額を返す。"""
+    if normalize_text(unit) != "式":
+        return amount
+    try:
+        qty = float(mojimoji.zen_to_han(normalize_text(quantity)).replace(",", ""))
+        value = float(mojimoji.zen_to_han(normalize_text(amount)).replace(",", ""))
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(qty) or not math.isfinite(value) or qty <= 0:
+        return None
+    return value / qty
+
+
 def office_int(xlsx_path):
     wb = openpyxl.load_workbook(xlsx_path, data_only=True)
     ws = wb.active
@@ -233,12 +252,12 @@ def office_int(xlsx_path):
 
         # ★ 中計 も 小計 と同様に除外する
         if (
-            (h_cell.value is None)
+            (normalize_text(h_cell.value) == "")
             and (not pattern_total.search(c_text))
             and (not pattern_mid_total.search(c_text))   # ← ここ追加
             and (not pattern_discount.search(c_text))
         ):
-            h_cell.value = row[8].value
+            h_cell.value = supplement_unit_price(row[8].value, row[5].value, row[6].value)
     for row in ws.iter_rows(min_row=2):
         for cell in row[2:5]:
             if cell.value is not None and isinstance(cell.value, str):
