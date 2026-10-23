@@ -21,7 +21,12 @@ OUTPUT_COLUMNS = (
     '記載頁', '商品名', '商品記号', '仕様寸法', '数量',
     '見積単価', '見積金額', '定価', '備考', '仕入価', '単位',
 )
-TRANSFER_COL_MAP = {column: column for column in ('A', 'B', 'C', 'D', 'E', 'F', 'K', 'L')}
+TRANSFER_COL_MAP_LIST_PRICE = {
+    column: column for column in ('A', 'B', 'C', 'D', 'E', 'F', 'K', 'L')
+}
+TRANSFER_COL_MAP_ESTIMATE_PRICE = {
+    column: column for column in ('A', 'B', 'C', 'D', 'E', 'F', 'G', 'K', 'L')
+}
 # 別形式のイトーキCSVで使われている列名。
 COLUMN_ALIASES = {'記載頁': 'カタログ頁', '定価': '本体価格'}
 
@@ -55,7 +60,7 @@ def _number(value, label):
 
 
 def build_transfer_df(records):
-    """テンプレートのA～F・K・L列用データ。割り切れない単価は丸めない。
+    """テンプレートのA～G・K・L列用データ。割り切れない単価は丸めない。
 
     数量が空欄またはゼロならL列は空欄にする。見出しや行順は保持する。
     """
@@ -65,6 +70,7 @@ def build_transfer_df(records):
     for row_number, row in enumerate(records, start=1):
         qty = _number(row.get('数量'), f'{row_number}行目の数量')
         cost = _number(row.get('仕入価'), f'{row_number}行目の仕入価')
+        estimate_price = _number(row.get('見積単価'), f'{row_number}行目の見積単価')
         price = _number(row.get('定価', row.get('本体価格')), f'{row_number}行目の定価')
         unit_cost = cost / qty if cost is not None and qty not in (None, 0) else None
 
@@ -75,10 +81,11 @@ def build_transfer_df(records):
             'A': row.get('記載頁', row.get('カタログ頁', '')),
             'B': row.get('商品名', ''), 'C': row.get('商品記号', ''),
             'D': row.get('仕様寸法', ''), 'E': excel_number(qty),
-            'F': row.get('単位', ''), 'K': excel_number(price),
+            'F': row.get('単位', ''), 'G': excel_number(estimate_price),
+            'K': excel_number(price),
             'L': excel_number(unit_cost),
         })
-    return pd.DataFrame(result, columns=list(TRANSFER_COL_MAP), dtype=object)
+    return pd.DataFrame(result, columns=list(TRANSFER_COL_MAP_ESTIMATE_PRICE), dtype=object)
 
 
 def read_itoki_csv(csv_path: str | Path) -> list[dict[str, str]]:
