@@ -4,6 +4,13 @@ from comany import comany, TRANSFER_COL_MAP as COMANY_COL_MAP
 from teisoh import load_teisoh_detail_df, TRANSFER_COL_MAP as TEISOH_COL_MAP
 from openpyxl.utils import column_index_from_string, get_column_letter
 import tempfile
+from itoki import (
+    OUTPUT_COLUMNS as ITOKI_COLUMNS,
+    TRANSFER_COL_MAP as ITOKI_COL_MAP,
+    read_itoki_csv,
+    prepare_csv_rows as prepare_itoki_rows,
+    build_transfer_df as build_itoki_transfer_df,
+)
 from weberton import (
     COLUMNS as WEBERTON_COLUMNS,
     TRANSFER_COL_MAP as WEBERTON_COL_MAP,
@@ -60,7 +67,7 @@ SUPPLIER_TARGET_SHEET = {
 def validate_dest_cell(dest_cell: str, expected_col: str = "B") -> int:
     m = re.match(r"^([A-Z]+)(\d+)$", (dest_cell or "").upper().strip())
     if not m:
-        raise ValueError("転記先セルは 'B3' の形式で入力してください")
+        raise ValueError(f"転記先セルは '{expected_col}3' の形式で入力してください")
     col, row = m.group(1), int(m.group(2))
     if col != expected_col:
         raise ValueError(f"転記先セルは {expected_col}列スタートで入力してください（例：{expected_col}{row}）")
@@ -89,7 +96,8 @@ def write_df_to_template_com(
 
 
     start_cell = (start_cell or "").strip().upper()
-    start_row = validate_dest_cell(start_cell, expected_col="B")
+    expected_col = min(col_map, key=column_index_from_string)
+    start_row = validate_dest_cell(start_cell, expected_col=expected_col)
 
     pythoncom.CoInitialize()
     excel = None
@@ -148,6 +156,7 @@ def get_col_map(company: str) -> dict:
         "コマニー": COMANY_COL_MAP,
         "帝国倉庫PDF": TEISOH_COL_MAP,
         "ウェバートンPDF": WEBERTON_COL_MAP,
+        "イトーキCSV": ITOKI_COL_MAP,
     }
     if company not in maps:
         raise ValueError(f"未対応の仕入先です: {company}")
@@ -268,7 +277,7 @@ def convert_xls_to_xlsx(xls_path):
 # ▼ 既存UI
 company = st.sidebar.selectbox(
     "仕入先を選択してください",
-    ["オフィス（１シート）", "オフィス（複数シート）", "コマニー", "帝国倉庫PDF", "ウェバートンPDF"],
+    ["オフィス（１シート）", "オフィス（複数シート）", "コマニー", "帝国倉庫PDF", "ウェバートンPDF", "イトーキCSV"],
     format_func=lambda name: "ウェバートンPDF（試運転中）" if name == "ウェバートンPDF" else name,
 )
 # 仕入先変更を検知
@@ -305,6 +314,9 @@ uploader_reset_counter = st.session_state.get("uploader_reset_counter", 0)
 is_pdf_supplier = company in ("帝国倉庫PDF", "ウェバートンPDF")
 supplier_file_type = ["pdf"] if is_pdf_supplier else ["xls", "xlsx"]
 supplier_file_label = "仕入先PDFファイルをアップロードしてください" if is_pdf_supplier else "仕入先ファイル（xls/.xlsx）をアップロードしてください"
+if company == "イトーキCSV":
+    supplier_file_type = ["csv"]
+    supplier_file_label = "イトーキの元CSVファイルをアップロードしてください"
 
 supplier_file = st.file_uploader(
     supplier_file_label,
@@ -322,7 +334,22 @@ if supplier_file:
     ext = os.path.splitext(supplier_file.name)[1].lower()
     supplier_file_bytes = supplier_file.getvalue()
     raw_path = save_uploaded_bytes(supplier_file_bytes, suffix=ext)
-    if company == "ウェバートンPDF":
+    if company == "イトーキCSV":
+        try:
+            itoki_rows = prepare_itoki_rows(read_itoki_csv(raw_path))
+            preview_rows = [list(ITOKI_COLUMNS)] + [
+                [row[name] for name in ITOKI_COLUMNS] for row in itoki_rows
+            ]
+            df_converted = pd.DataFrame(
+                preview_rows,
+                columns=[get_column_letter(i + 1) for i in range(len(ITOKI_COLUMNS))],
+                index=range(1, len(preview_rows) + 1),
+            )
+            preview_sheet_name = "イトーキCSV"
+        except (OSError, ValueError) as exc:
+            st.error(f"イトーキCSVの読み込みに失敗しました: {exc}")
+            st.stop()
+    elif company == "ウェバートンPDF":
         try:
             weberton_records = extract_weberton_pdf(raw_path)
             validate_weberton_amounts(weberton_records)
@@ -362,7 +389,7 @@ template_file = st.file_uploader(
 )
 
 # ★ 変換処理
-if supplier_file:
+if supplier_file and company != "イトーキCSV":
     if company == "オフィス（１シート）":
         converted_excel_path = office_int(xlsx_path)
 
@@ -450,8 +477,10 @@ elif df_converted is not None and st.session_state.template_wb:
     # --- ★ ここから転記UI ---
     st.markdown("### 転記設定（開始セルと転記先セルを入力）")
 
-    src = st.text_input("転記元の開始セル（例: C14）", key="src_cell")
-    dest = st.text_input("転記先セル（例: B3）", key="dest_cell")
+    src_example = "A2" if company == "イトーキCSV" else "C14"
+    dest_example = "A3" if company == "イトーキCSV" else "B3"
+    src = st.text_input(f"転記元の開始セル（例: {src_example}）", key="src_cell")
+    dest = st.text_input(f"転記先セル（例: {dest_example}）", key="dest_cell")
     output_name = st.text_input("出力ファイル名（拡張子不要）", value="merged_result", key="output_name")
 
 
@@ -461,10 +490,10 @@ elif df_converted is not None and st.session_state.template_wb:
         dest = (st.session_state.get("dest_cell") or "").strip().upper()
 
         if not src:
-            st.error("転記元の開始セル（例: C2）を入力してください")
+            st.error(f"転記元の開始セル（例: {src_example}）を入力してください")
             st.stop()
         if not dest:
-            st.error("転記先セル（例: B2）を入力してください")
+            st.error(f"転記先セル（例: {dest_example}）を入力してください")
             st.stop()
 
         # ② ロック獲得
@@ -474,7 +503,7 @@ elif df_converted is not None and st.session_state.template_wb:
 
         try:
             src_row = get_row_from_cell(src)
-            if company == "ウェバートンPDF":
+            if company in ("ウェバートンPDF", "イトーキCSV"):
                 src_row = max(2, src_row)  # 1行目の列名は転記しない
             df_to_write = df_converted.loc[src_row:].copy()
 
@@ -494,6 +523,14 @@ elif df_converted is not None and st.session_state.template_wb:
                     for i, name in enumerate(WEBERTON_COLUMNS)
                 }
                 df_to_write = build_weberton_transfer_df(
+                    df_to_write.rename(columns=source_columns).to_dict("records")
+                )
+            elif company == "イトーキCSV":
+                source_columns = {
+                    get_column_letter(i + 1): name
+                    for i, name in enumerate(ITOKI_COLUMNS)
+                }
+                df_to_write = build_itoki_transfer_df(
                     df_to_write.rename(columns=source_columns).to_dict("records")
                 )
 
