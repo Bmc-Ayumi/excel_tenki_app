@@ -72,6 +72,12 @@ def extract_weberton_pdf(pdf_path: str | Path) -> list[dict[str, str]]:
             matched = False
             for table in tables:
                 raw_rows = table.extract()
+                # 表の上端にある空白帯が、空の行として検出される帳票もある。
+                # データ行は読み飛ばさず、見出しより前の空行だけを除く。
+                while raw_rows and not any(compact(cell or '') for cell in raw_rows[0]):
+                    raw_rows = raw_rows[1:]
+                if not raw_rows:
+                    continue
                 header = [compact(cell or '') for cell in raw_rows[0]]
                 if len(header) != 9 or header[4:9] != ['数量', '単位', '単価', '金額', '定価']:
                     continue
