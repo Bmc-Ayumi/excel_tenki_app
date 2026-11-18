@@ -1,4 +1,10 @@
 import streamlit as st
+from shibusawa_tokyo import (
+    COLUMNS as SHIBUSAWA_COLUMNS,
+    TRANSFER_COL_MAP as SHIBUSAWA_COL_MAP,
+    extract_shibusawa_detail_rows,
+    build_transfer_df as build_shibusawa_transfer_df,
+)
 from office import office_int, office_int_multi, TRANSFER_COL_MAP as OFFICE_COL_MAP
 from comany import comany, TRANSFER_COL_MAP as COMANY_COL_MAP
 from teisoh import load_teisoh_detail_df, TRANSFER_COL_MAP as TEISOH_COL_MAP
@@ -159,6 +165,7 @@ def get_col_map(company: str) -> dict:
         "コマニー": COMANY_COL_MAP,
         "帝国倉庫PDF": TEISOH_COL_MAP,
         "ウェバートンPDF": WEBERTON_COL_MAP,
+        "澁澤（東京）PDF": SHIBUSAWA_COL_MAP,
         "イトーキCSV（定価）": ITOKI_LIST_PRICE_COL_MAP,
         "イトーキCSV（見積単価）": ITOKI_ESTIMATE_PRICE_COL_MAP,
     }
@@ -192,6 +199,8 @@ if st.sidebar.button("🧹 新規スタート（データクリア）"):
         "dest_cell",
         "output_name",
         "prev_company",
+        "shibusawa_source_bytes",
+        "shibusawa_rows",
     ]:
         if k in st.session_state:
             del st.session_state[k]
@@ -281,7 +290,7 @@ def convert_xls_to_xlsx(xls_path):
 # ▼ 既存UI
 company = st.sidebar.selectbox(
     "仕入先を選択してください",
-    ["オフィス（１シート）", "オフィス（複数シート）", "コマニー", "帝国倉庫PDF", "ウェバートンPDF", *ITOKI_COMPANIES],
+    ["オフィス（１シート）", "オフィス（複数シート）", "コマニー", "帝国倉庫PDF", "ウェバートンPDF", "澁澤（東京）PDF", *ITOKI_COMPANIES],
 )
 # 仕入先変更を検知
 prev_company = st.session_state.get("prev_company")
@@ -299,6 +308,8 @@ elif prev_company != company:
         "dest_cell",
         "preview_sheet_name",
         "current_supplier_name",
+        "shibusawa_source_bytes",
+        "shibusawa_rows",
     ]:
         if k in st.session_state:
             del st.session_state[k]
@@ -314,7 +325,7 @@ elif prev_company != company:
 
 uploader_reset_counter = st.session_state.get("uploader_reset_counter", 0)
 
-is_pdf_supplier = company in ("帝国倉庫PDF", "ウェバートンPDF")
+is_pdf_supplier = company in ("帝国倉庫PDF", "ウェバートンPDF", "澁澤（東京）PDF")
 supplier_file_type = ["pdf"] if is_pdf_supplier else ["xls", "xlsx"]
 supplier_file_label = "仕入先PDFファイルをアップロードしてください" if is_pdf_supplier else "仕入先ファイル（xls/.xlsx）をアップロードしてください"
 if company in ITOKI_COMPANIES:
@@ -331,6 +342,9 @@ converted_excel_path = None
 selected_start_sheet = None
 df_converted = None
 preview_sheet_name = None
+if company == "澁澤（東京）PDF" and supplier_file is None:
+    st.session_state.pop("shibusawa_source_bytes", None)
+    st.session_state.pop("shibusawa_rows", None)
 
 # ★ ここで先に処理開始シートを表示
 if supplier_file:
@@ -351,6 +365,24 @@ if supplier_file:
             preview_sheet_name = company
         except (OSError, ValueError) as exc:
             st.error(f"イトーキCSVの読み込みに失敗しました: {exc}")
+            st.stop()
+    elif company == "澁澤（東京）PDF":
+        try:
+            if st.session_state.get("shibusawa_source_bytes") != ("tokyo_text_v3", supplier_file_bytes):
+                with st.spinner("澁澤PDFを読み取っています。数分かかる場合があります。"):
+                    rows = extract_shibusawa_detail_rows(raw_path)
+                if rows.empty:
+                    raise ValueError("表紙の次ページ以降に明細があるPDFを選んでください。")
+                st.session_state["shibusawa_rows"] = rows
+                st.session_state["shibusawa_source_bytes"] = ("tokyo_text_v3", supplier_file_bytes)
+            rows = st.session_state["shibusawa_rows"]
+            preview_rows = [SHIBUSAWA_COLUMNS] + rows[SHIBUSAWA_COLUMNS].values.tolist()
+            df_converted = pd.DataFrame(
+                preview_rows, columns=list("ABCDEFG"), index=range(1, len(preview_rows) + 1),
+            ).fillna("")
+            preview_sheet_name = company
+        except (OSError, ValueError, RuntimeError) as exc:
+            st.error(f"澁澤（東京）PDFの抽出に失敗しました: {exc}")
             st.stop()
     elif company == "ウェバートンPDF":
         try:
@@ -392,7 +424,7 @@ template_file = st.file_uploader(
 )
 
 # ★ 変換処理
-if supplier_file and company not in ITOKI_COMPANIES:
+if supplier_file and company not in (*ITOKI_COMPANIES, "澁澤（東京）PDF"):
     if company == "オフィス（１シート）":
         converted_excel_path = office_int(xlsx_path)
 
@@ -481,6 +513,8 @@ elif df_converted is not None and st.session_state.template_wb:
     st.markdown("### 転記設定（開始セルと転記先セルを入力）")
 
     src_example = "A2" if company in ITOKI_COMPANIES else "C14"
+    if company == "澁澤（東京）PDF":
+        src_example = "B2"
     dest_example = "A3" if company in ITOKI_COMPANIES else "B3"
     src = st.text_input(f"転記元の開始セル（例: {src_example}）", key="src_cell")
     dest = st.text_input(f"転記先セル（例: {dest_example}）", key="dest_cell")
@@ -506,12 +540,12 @@ elif df_converted is not None and st.session_state.template_wb:
 
         try:
             src_row = get_row_from_cell(src)
-            if company == "ウェバートンPDF" or company in ITOKI_COMPANIES:
+            if company in ("ウェバートンPDF", "澁澤（東京）PDF", *ITOKI_COMPANIES):
                 src_row = max(2, src_row)  # 1行目の列名は転記しない
             df_to_write = df_converted.loc[src_row:].copy()
 
             cols_check = [c for c in ["A","B","C","D","E","F"] if c in df_to_write.columns]
-            if cols_check:
+            if cols_check and company != "澁澤（東京）PDF":
                 df_to_write = df_to_write[
                     ~df_to_write[cols_check]
                     .astype(str)
@@ -526,6 +560,11 @@ elif df_converted is not None and st.session_state.template_wb:
                     for i, name in enumerate(WEBERTON_COLUMNS)
                 }
                 df_to_write = build_weberton_transfer_df(
+                    df_to_write.rename(columns=source_columns).to_dict("records")
+                )
+            elif company == "澁澤（東京）PDF":
+                source_columns = dict(zip("ABCDEFG", SHIBUSAWA_COLUMNS))
+                df_to_write = build_shibusawa_transfer_df(
                     df_to_write.rename(columns=source_columns).to_dict("records")
                 )
             elif company in ITOKI_COMPANIES:
