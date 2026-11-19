@@ -6,6 +6,26 @@ import shibusawa as s
 
 
 class ShibusawaRulesTests(unittest.TestCase):
+    def test_increased_pdf_prices_reach_transfer_unchanged(self):
+        rows = [s._parse_shibusawa_line(line, "1") for line in (
+            "班長 2 21,000 42,000",
+            "一般作業員 3 19,000 57,000",
+            "ラベル 100 20 2,000",
+        )]
+        prepared = s._fill_shibusawa_units(s._prepare_shibusawa_rows(rows))
+        self.assertEqual(s.build_transfer_df(prepared)["K"].tolist(), [21000, 19000, 20])
+
+    def test_missing_price_uses_document_amount_only(self):
+        messages = []
+        rows = [
+            s._row("1", "班長", "2", amount="42,000"),
+            s._row("1", "ラベル", "100"),
+        ]
+        prepared = s._fill_shibusawa_units(s._prepare_shibusawa_rows(rows, messages))
+        self.assertEqual(s.build_transfer_df(prepared)["K"].tolist(), [21000, ""])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("金額÷数量", messages[0])
+
     def test_all_detail_pages_are_read_in_order(self):
         for scanned in (False, True):
             for detail_count in (2, 3):

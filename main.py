@@ -291,6 +291,11 @@ def convert_xls_to_xlsx(xls_path):
 company = st.sidebar.selectbox(
     "仕入先を選択してください",
     ["オフィス（１シート）", "オフィス（複数シート）", "コマニー", "帝国倉庫PDF", "ウェバートンPDF", "澁澤（東京）PDF", *ITOKI_COMPANIES],
+    format_func=lambda name: {
+        "オフィス（１シート）": "オフィスExcel（１シート）",
+        "オフィス（複数シート）": "オフィスExcel（複数シート）",
+        "コマニー": "コマニーExcel",
+    }.get(name, name),
 )
 # 仕入先変更を検知
 prev_company = st.session_state.get("prev_company")

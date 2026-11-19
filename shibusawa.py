@@ -62,70 +62,60 @@ def _row(page: str, item: str, quantity: str = "", unit: str = "", unit_price: s
 
 
 
-def _rate(condition: str, unit: str, unit_price: str) -> dict[str, str]:
-    return {"condition": condition, "unit": unit, "unit_price": unit_price}
+def _unit_rule(condition: str, unit: str) -> dict[str, str]:
+    return {"condition": condition, "unit": unit}
 
 
-SHIBUSAWA_RATE_MASTER: dict[str, list[dict[str, str]]] = {
-    "平台車": [_rate("", "台", "")],
-    "施工費": [_rate("", "式", "")],
-    "器材費": [_rate("", "式", "")],
-    "養生費": [_rate("", "式", "")],
-    "諸経費": [_rate("", "式", "")],
+# Unit defaults only; prices come from the PDF or amount / quantity.
+SHIBUSAWA_UNIT_RULES: dict[str, list[dict[str, str]]] = {
+    "平台車": [_unit_rule("", "台")],
+    "施工費": [_unit_rule("", "式")],
+    "器材費": [_unit_rule("", "式")],
+    "養生費": [_unit_rule("", "式")],
+    "諸経費": [_unit_rule("", "式")],
     "班長": [
-        _rate("日中", "名", "18,000"),
-        _rate("時間外", "名", "2,800"),
-        _rate("深夜時間外", "名", "3,300"),
-        _rate("夜間", "名", "28,000"),
+        _unit_rule("日中", "名"),
+        _unit_rule("時間外", "名"),
+        _unit_rule("深夜時間外", "名"),
+        _unit_rule("夜間", "名"),
     ],
     "一般作業員": [
-        _rate("日中", "名", "16,000"),
-        _rate("時間外", "h", "2,500"),
-        _rate("深夜時間外", "h", "3,000"),
-        _rate("夜間", "名", "25,000"),
+        _unit_rule("日中", "名"),
+        _unit_rule("時間外", "h"),
+        _unit_rule("深夜時間外", "h"),
+        _unit_rule("夜間", "名"),
     ],
     "人員輸送車": [
-        _rate("", "車", "10,000"),
+        _unit_rule("", "車"),
     ],
     "4t車": [
-        _rate("日中", "車", "40,000"),
-        _rate("時間外", "h", "3,500"),
-        _rate("深夜時間外", "h", "4,000"),
-        _rate("夜間", "車", "58,000"),
+        _unit_rule("日中", "車"),
+        _unit_rule("時間外", "h"),
+        _unit_rule("深夜時間外", "h"),
+        _unit_rule("夜間", "車"),
     ],
     "2t車": [
-        _rate("日中", "車", "35,000"),
-        _rate("時間外", "h", "3,500"),
-        _rate("深夜時間外", "h", "4,000"),
-        _rate("夜間", "車", "50,000"),
+        _unit_rule("日中", "車"),
+        _unit_rule("時間外", "h"),
+        _unit_rule("深夜時間外", "h"),
+        _unit_rule("夜間", "車"),
     ],
-    "ワンタッチケース": [_rate("", "枚", "250")],
-    "アルバムケース": [_rate("", "枚", "220")],
-    "ノートPCケース": [_rate("", "枚", "150")],
-    "デスクトップPCケース": [_rate("", "枚", "400")],
-    "布テープ": [_rate("", "個", "350")],
-    "養生テープ": [_rate("", "", "")],
-    "ラベル": [_rate("", "枚", "15")],
-    "エアキャップ": [_rate("", "本", "4,500")],
-    "ブルーシートロール": [_rate("", "本", "5,000")],
-    "資材配達・回収費": [_rate("", "式", "20,000")],
+    "ワンタッチケース": [_unit_rule("", "枚")],
+    "アルバムケース": [_unit_rule("", "枚")],
+    "ノートPCケース": [_unit_rule("", "枚")],
+    "デスクトップPCケース": [_unit_rule("", "枚")],
+    "布テープ": [_unit_rule("", "個")],
+    "養生テープ": [_unit_rule("", "")],
+    "ラベル": [_unit_rule("", "枚")],
+    "エアキャップ": [_unit_rule("", "本")],
+    "ブルーシートロール": [_unit_rule("", "本")],
+    "資材配達・回収費": [_unit_rule("", "式")],
 }
-
-
-SHIBUSAWA_RATE_INDEX: dict[tuple[str, str, str], str] = {
-    (item, rate["condition"], rate["unit"]): rate["unit_price"]
-    for item, rates in SHIBUSAWA_RATE_MASTER.items()
-    for rate in rates
-}
-
-
-def lookup_shibusawa_rate(item: str, condition: str, unit: str) -> str | None:
-    return SHIBUSAWA_RATE_INDEX.get((item, condition, unit))
 
 
 def _lookup_shibusawa_unit(item: str, condition: str = "") -> str:
     """Return a condition-specific unit, falling back to the item's first unit."""
-    rates = SHIBUSAWA_RATE_MASTER.get(item, [])
+    rates = SHIBUSAWA_UNIT_RULES.get(item, [])
     if condition:
         for rate in rates:
             if rate["condition"] == condition and rate["unit"]:
@@ -168,7 +158,7 @@ def _fill_shibusawa_units(rows: list[dict[str, str]]) -> list[dict[str, str]]:
             text = f"{item} {row.get(COLUMNS[6], '')}"
             conditions = {
                 rate["condition"]
-                for rate in SHIBUSAWA_RATE_MASTER.get(item, [])
+                for rate in SHIBUSAWA_UNIT_RULES.get(item, [])
                 if rate["condition"] and rate["condition"] in text
             }
             condition = next(iter(conditions), "")
@@ -180,7 +170,7 @@ def _fill_shibusawa_units(rows: list[dict[str, str]]) -> list[dict[str, str]]:
                 # but their condition name still determines the unit.
                 condition_rates = [
                     (rate["condition"], rate["unit"])
-                    for rates in SHIBUSAWA_RATE_MASTER.values()
+                    for rates in SHIBUSAWA_UNIT_RULES.values()
                     for rate in rates
                     if rate["condition"] and rate["unit"]
                 ]
